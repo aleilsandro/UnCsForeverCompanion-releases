@@ -1,0 +1,79 @@
+name: Release AddOn and Pulser
+
+on:
+  push:
+    tags:
+      - '[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Unpack source snapshot
+        run: unzip -oq project-source.zip -d .
+      - name: Verify version and addon files
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          toc_version="$(sed -n 's/^## Version: *//p' UnCsForeverCompanion.toc | tr -d '\r')"
+          lua_version="$(sed -n 's/^ns.VERSION = "\([^"]*\)".*/\1/p' UnCsForeverCompanion.lua | tr -d '\r')"
+          [[ "${tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Tag non valido: usare MAJOR.MINOR.PATCH'; exit 1; }
+          [[ "$tag" == "$toc_version" && "$tag" == "$lua_version" ]] || { echo 'Tag, TOC e versione Lua devono coincidere'; exit 1; }
+          grep -Eq '^## Interface: 16001[[:space:]]*$' UnCsForeverCompanion.toc
+          while IFS= read -r file; do
+            file="${file%$'\r'}"
+            [[ -z "$file" || "$file" == \#* ]] && continue
+            [[ -f "$file" ]] || { echo "File mancante nel TOC: $file"; exit 1; }
+          done < UnCsForeverCompanion.toc
+      - name: Package and publish release
+        uses: BigWigsMods/packager@v2
+        with:
+          args: -g forever
+        env:
+          GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sources:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Attach corresponding source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp project-source.zip UnCsForeverCompanion-source-${GITHUB_REF_NAME}.zip
+          gh release upload ${GITHUB_REF_NAME} UnCsForeverCompanion-source-${GITHUB_REF_NAME}.zip --clobber
+
+  pulser:
+    needs: sources
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack source snapshot
+        shell: pwsh
+        run: Expand-Archive -LiteralPath project-source.zip -DestinationPath . -Force
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Release Pulser and bundled addon
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./installer/build-web-bridge.ps1 -Version $env:GITHUB_REF_NAME
+          $folder = 'desktop/dist-bridge'
+          Copy-Item "$folder/latest.yml" "$folder/pulser-latest.yml"
+          gh release upload "$env:GITHUB_REF_NAME" "$folder/UnCs-Forever-Web-Setup-$env:GITHUB_REF_NAME.exe" "$folder/pulser-latest.yml" --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
